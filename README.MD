@@ -10,7 +10,8 @@ MAC_ADDRESS : format 00:00:00:00:00:00
 
 In reverse engineering, I analyzed that:
 
-Trame is composed by 
+Trame is composed by
+
 |   Header    | data lenght | ?? |       DATA     | CRC8 | end of line 
 
 | 51:78:XX:00 |     05      | 00 | 82:7f:7f:7e:82 | 60   |     ff     
