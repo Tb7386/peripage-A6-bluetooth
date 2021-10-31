@@ -11,8 +11,8 @@ MAC_ADDRESS : format 00:00:00:00:00:00
 In reverse engineering, I analyzed that:
 
 Trame is composed by 
-# |   Header    | data lenght | ?? |       DATA     | CRC8 | end of line |
-# | 51:78:XX:00 |     05      | 00 | 82:7f:7f:7e:82 | 60   |     ff      |
+|   Header    | data lenght | ?? |       DATA     | CRC8 | end of line |
+| 51:78:XX:00 |     05      | 00 | 82:7f:7f:7e:82 | 60   |     ff      |
 
 Header XX :
    - bf : Print 384 dot
@@ -22,3 +22,7 @@ Header XX :
 Print data (eg 82 -> 1000 0010) :
   - bit[0] : 1 = Black, 0 = White
   - bit[2-7] : number of dot
+
+## ToDo
+
+Print multilines text
