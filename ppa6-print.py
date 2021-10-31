@@ -1,178 +1,170 @@
-#!/usr/bin/env python3
-import bluetooth
-import argparse
+from gattlib import GATTRequester
+from PIL import Image, ImageOps, ImageFont, ImageDraw
 import time
+import crc8
 import sys
-from PIL import Image, ImageOps, ImageEnhance
-from tqdm import tqdm
-import qrcode
-from cairosvg import svg2png
-from io import BytesIO
+import argparse
 
-parser = argparse.ArgumentParser(description="Print an image to a Peripage A6 via Bluetooth")
+parser = argparse.ArgumentParser(description="Print an text to a Peripage A6 BLE")
 parser.add_argument("BTMAC",help="BT MAC address of the Peripage A6")
 
-parser.add_argument("-i", "--imagefile",type=str, help="Image file to be printed (JPG,PNG,TIF...)")
-parser.add_argument("-s","--svg",type=str,help="SVG file to be printed (.svg / .svgz")
-parser.add_argument("-qr","--qrcode",type=str, help="Content of the QR code to be printed")
-parser.add_argument("-b", "--brightness", type=float, help="Adjust the brightness using a factor ")
-parser.add_argument("-c", "--contrast", type=float, help = "Enhance contrast using a factor")
-parser.add_argument("-nf","--nofeed", action="store_true", help="Do not feed extra paper after printing (use for seamless printing")
-args = parser.parse_args();
+parser.add_argument("-t", "--text",type=str, help="Text to be printed")
+args = parser.parse_args()
 
-host = args.BTMAC
-printargs=0
-
-if (args.imagefile):
-    printargs=printargs+1
-if (args.qrcode):
-    printargs=printargs+1
-if (args.svg):
-    printargs=printargs+1
-
-if (printargs>1):
-    print("ERROR: Please specfiy only one printing mode out of --imagefile, --qr or --svg")
+if not args.text:
+    print("ERROR: Please specfiy text with -t or --text argument")
     sys.exit(1)
 
-sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
-
-def getDeviceName():
-    cmd = bytes.fromhex("10ff3011")
-    sock.send(cmd)
-    data = sock.recv(1024)
-    return data
-
-
-def getFWDPI():
-    cmd = bytes.fromhex("10ff20f1")
-    sock.send(cmd)
-    data = sock.recv(1024)
-    return data
-
-
-def getSerial():
-    cmd = bytes.fromhex("10ff20f2")
-    sock.send(cmd)
-    data = sock.recv(1024)
-    return data
-
-
-def reset():
-    cmd = bytes.fromhex("10ff50f1")
-    sock.send(cmd)
-    data = sock.recv(1024)
-    cmd = bytes.fromhex("000000000000000000000000")
-    sock.send(cmd)
-    return data
-
-
-def reset2():
-    cmd = bytes.fromhex("10ff100002")
-    sock.send(cmd)
-    data = sock.recv(1024)
-    return data
-
-
-def newline():
-    cmd = bytes.fromhex("10fffe01")
-    sock.send(cmd)
-    sock.send('\n')
-
-
-def printString(outputString):
-    cmd = bytes.fromhex("10fffe01")
-    sock.send(cmd)
-    line = bytes(outputString, "ascii")
-    sock.send(line)
-
-
-def loadImageFromFileName(filename):
-    # Load Image and process it
-    img = Image.open(filename)
+# ------------------------------------------------------------------------------
+# imgFromString : Convert string to binary image
+# ------------------------------------------------------------------------------
+def imgFromString(s):
+    # Font choice
+    font = ImageFont.truetype("liberation-mono/LiberationMono-Regular.ttf", 50)
+    # Get size of text
+    size = font.getsize_multiline(s)
+    # Fix height and width
+    size_x = 384 if size[0] <= 384 else size[0]
+    size_y = size[1]
+    # Create image
+    img = Image.new("RGB", size=(size_x, size_y), color="white")
+    # Draw text in image
+    draw = ImageDraw.Draw(img)
+    draw.text((0, 0), s, (0, 0, 0), font=font)
+    # Convert RGB image to binary image
+    img = ImageOps.invert(img.convert('L'))
+    img = img.convert('1')
+    # Flip image to print
+    #img = ImageOps.flip(img)
+    #img = ImageOps.mirror(img)
+    # Save image to file
+    #img.save('img.png')
     return img
 
-def loagImageFromSVG(filename):
-    png_data = svg2png(file_obj=open(filename,"rb"),background_color="#FFFFFF",output_width=384)
-    return Image.open(BytesIO(png_data))
+# ------------------------------------------------------------------------------
+# binFromImg : Convert binary image to array
+# ------------------------------------------------------------------------------
+def binFromImg(img):
+    binImg=[]
+    for line in range (0,img.size[1]):
+        binImg.append(''.join(format(byte, '08b') for byte in img.tobytes()[int(line*(img.size[0]/8)):int((line*(img.size[0]/8))+img.size[0]/8)]))
+    return binImg
 
-def printImage(img):
-    img = img.convert("L")
+# ------------------------------------------------------------------------------
+# dataCrc : Calcul hex CRC-8
+# ------------------------------------------------------------------------------
+def dataCrc(data):
+    hash = crc8.crc8()
+    hash.update(bytes.fromhex(data))
+    return str(hash.hexdigest())
 
-    img_width = img.size[0]
-    img_height = img.size[1]
+# ------------------------------------------------------------------------------
+# binCount : Convert binary image to array
+# ------------------------------------------------------------------------------
+def binCount (binImg):
+    trame=[]
+    i=0
+    #read Image line by line
+    for line in binImg:
+        nb_zero=0
+        nb_one=0
+        trame.append('')
+        # Read line char by char
+        for char in line:
+            # Bit '0' process
+            if char == '0':
+                # Bit '1' before
+                if nb_one!=0:
+                    # Format '1' number to hex + 128 (First bit to print black)
+                    trame[i]+='{:02x}'.format(128+nb_one)
+                    nb_one=0
+                # Max number is 127 (First bit color + 127 max  number = '0x7f')
+                if nb_zero>126:
+                    trame[i]+='{:02x}'.format(nb_zero)
+                    nb_zero=0
+                nb_zero += 1
+            # Bit '1' process
+            if char == '1':
+                # Bit '0' before
+                if nb_zero!=0:
+                    # Format '0' number to hex
+                    trame[i]+='{:02x}'.format(nb_zero)
+                    nb_zero=0
+                # Max number is 127 (First bit color + 127 max  number = '0xff')
+                if nb_one>126:
+                    trame[i]+='{:02x}'.format(128+nb_one)
+                    nb_one=0
+                nb_one += 1
+        # End of trame. If '1' or '0' before process
+        if nb_zero!=0:
+            trame[i]+='{:02x}'.format(nb_zero)
+        elif nb_one!=0:
+            trame[i]+='{:02x}'.format(128+nb_one)
+        i+=1
+    return trame
 
-    # brightness / contrast
-    if args.brightness:
-        print("Enhancing brightness with factor ", args.brightness)
-        enhancer = ImageEnhance.Brightness(img)
-        img = enhancer.enhance(args.brightness)
+# ------------------------------------------------------------------------------
+# bleConnect : Connect to printer mac
+# ------------------------------------------------------------------------------
+def bleConnect(mac):
+    host = mac
+    req = GATTRequester(host, False)
+    req.connect(True)
+    # Some config trame
+    req.write_by_handle(0x09, bytes([1, 0]))
+    time.sleep(0.02)
+    req.write_by_handle(0x000e, bytes([1, 0]))
+    time.sleep(0.02)
+    req.write_by_handle(0x0011, bytes([2, 0]))
+    time.sleep(0.02)
+    req.exchange_mtu(83)
+    time.sleep(0.02)
+    req.write_cmd(0x0006, bytes([18, 81, 120, 168, 0, 1, 0, 0, 0, 255, 18, 81, 120, 163, 0, 1, 0, 0, 0, 255]))
+    time.sleep(0.02)
+    req.write_cmd(0x0006, bytes([18, 81, 120, 187, 0, 1, 0, 1, 7, 255]))
+    time.sleep(0.02)
+    req.write_cmd(0x0006, bytes([18, 81, 120, 163, 0, 1, 0, 0, 0, 255]))
+    time.sleep(0.2)
+    return req
 
-    if args.contrast:
-        print("Enhancing brightness with contrast ", args.contrast)
-        enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(args.contrast)
+# ------------------------------------------------------------------------------
+# printData : Print text
+# ------------------------------------------------------------------------------
+def printText(text,req):
+    data = binCount(binFromImg(imgFromString(text)))
+    for dat in data:
+        # Header of trame
+        head = "5178bf00"
+        # Format BT trame
+        trame=head + '{:02x}'.format(len(bytes.fromhex(dat)),'x') + "00" + dat + dataCrc(dat) + "ff"
+        print(trame)
+        i = len(trame)
+        # Pull 40 bytes trames
+        while i > 0:
+            if i > 40:
+                req.write_cmd(0x06, bytes.fromhex(trame[len(trame)-i:len(trame)-i+40]))
+                i -= 40
+            else:
+                req.write_cmd(0x06, bytes.fromhex(trame[len(trame)-i:len(trame)]))
+                i -= 40
+            time.sleep(0.01)
+    # 90 dp moving forward paper
+    forwardPaper(90)
+    return 0
 
-    img = ImageOps.invert(img)
+# ------------------------------------------------------------------------------
+# forwardPaper : Moving forward
+# ------------------------------------------------------------------------------
+def forwardPaper(dp):
+    head = "5178a100"
+    data = '{:02x}'.format(dp) + '00'
+    # Format BT trame
+    trame=head + '{:02x}'.format(len(bytes.fromhex(data)),'x') + "00" + data + dataCrc(data) + "ff"
+    req.write_cmd(0x06, bytes.fromhex(trame))
+    time.sleep(0.01)
 
-    new_width = 384 #Peripage A6 image width
-    scale = new_width / float(img_width)
-    new_height = int(img_height * scale)
-
-    print ("Source image dimensions: ", img_width, img_height)
-    print ("Printing image dimensions:", new_width, new_height)
-
-    if (new_height>65535):
-        print ("Target image height is too large. Can't print this (yet)")
-        sys.exit(1)
-
-    img = img.resize((384, new_height), Image.ANTIALIAS)
-
-    img = img.convert("1")
-    # write chunks of 122 bytes to printer
-    cmd = bytes.fromhex("10fffe01")
-    sock.send(cmd)
-    chunksize = 122
-    sock.send(bytes.fromhex("000000000000000000000000"))
-    height_bytes=(new_height).to_bytes(2, byteorder="little")
-    cmd = bytes.fromhex("1d7630003000")+height_bytes
-    sock.send(cmd)
-
-    # send image to printer
-    image_bytes = img.tobytes()
-
-    print("Printing %d chunks" % (len(image_bytes)/chunksize))
-    print()
-    for i in tqdm(range(0, len(image_bytes), chunksize)):
-        chunk = image_bytes[i:i + chunksize]
-        sock.send(chunk)
-        time.sleep(0.02)
-    if not args.nofeed:
-        print("Feeding...")
-        emptyLine=[0 for i in range(1,122)];
-        for i in range(1,35):
-            sock.send(bytes(emptyLine))
-            time.sleep(0.02)
-    sock.send(bytes.fromhex("1b4a4010fffe45"))
-    print("Printing complete")
-
-
-print("Connecting")
-sock.connect((host, 1))
-
-deviceName = getDeviceName()
-print("Device Name", deviceName)
-print("Device Info", getFWDPI())
-print("Serial Number", getSerial())
-
-print("Resetting device")
-reset()
-
-if args.imagefile:
-    print("Printing image", args.imagefile)
-    printImage(loadImageFromFileName(args.imagefile))
-if args.qrcode:
-    print("Printing QR code with content:", args.qrcode)
-    printImage(qrcode.make(args.qrcode))
-if (args.svg):
-    print("Printing SVG fike", args.svg)
-    printImage(loagImageFromSVG(args.svg))
+#Start
+host = args.BTMAC
+if args.text:
+    req = bleConnect(host)
+    printText(args.text,req)
